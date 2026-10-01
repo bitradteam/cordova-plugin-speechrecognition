@@ -37,9 +37,10 @@ Result of success callback is a `Boolean`.
 let options = {
   String language,
   Number matches,
-  String prompt,      // Android only
-  Boolean showPopup,  // Android only
-  Boolean showPartial 
+  String prompt,                 // Android only
+  Boolean showPopup,             // Android only
+  Boolean showPartial,
+  Number completeSilenceLength   // Android only
 }
 
 window.plugins.speechRecognition.startListening(
@@ -53,6 +54,7 @@ This method has an options parameter with the following optional values:
 - `prompt` {String} displayed prompt of listener popup window (default `""`, Android only)
 - `showPopup` {Boolean} display listener popup window with prompt (default `true`, Android only)
 - `showPartial` {Boolean} Allow partial results to be returned (default `false`)
+- `completeSilenceLength` {Number} milliseconds of silence after which the input is considered complete (default: system value, Android only, ignored by some recognizers)
 
 Result of success callback is an `Array` of recognized terms.
 
@@ -146,7 +148,7 @@ SpeechRecognition.startListening(options)
     (onerror) => console.log('error:', onerror)
   )
 
-// Stop the recognition process (iOS only)
+// Stop the recognition process
 SpeechRecognition.stopListening()
 
 // Get the list of supported languages
@@ -206,7 +208,15 @@ The Speech APIs perform speech recognition by communicating with Apple's servers
 
 Because your app may need to connect to the servers to perform recognition, it's essential that you respect the privacy of your users and treat their utterances as sensitive data. For this reason, you must get the user's explicit permission before you initiate speech recognition.
 
-The plugin works in [AVAudioSessionCategoryPlayAndRecord](https://developer.apple.com/reference/avfoundation/avaudiosessioncategoryplayandrecord) mode to enable playing audio.
+The plugin works in [AVAudioSessionCategoryPlayAndRecord](https://developer.apple.com/reference/avfoundation/avaudiosessioncategoryplayandrecord) mode to enable playing audio. The previous audio session configuration is restored when recognition ends.
+
+### Usage descriptions
+
+The texts shown in the iOS permission prompts can be set at install time:
+
+```
+cordova plugin add cordova-plugin-speechrecognition --variable MICROPHONE_USAGE_DESCRIPTION="..." --variable SPEECH_RECOGNITION_USAGE_DESCRIPTION="..."
+```
 
 
 ### Further readings

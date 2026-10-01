@@ -34,9 +34,9 @@ public class LanguageDetailsChecker extends BroadcastReceiver {
             languagePreference = results.getString(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE);
         }
 
-        if (results.containsKey(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES)) {
-            supportedLanguages = results.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES);
+        supportedLanguages = results.getStringArrayList(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES);
 
+        if (supportedLanguages != null) {
             JSONArray languages = new JSONArray(supportedLanguages);
             callbackContext.success(languages);
             return;
