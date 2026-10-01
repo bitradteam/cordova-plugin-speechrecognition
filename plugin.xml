@@ -2,7 +2,7 @@
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
   xmlns:android="http://schemas.android.com/apk/res/android"
   id="cordova-plugin-speechrecognition"
-  version="1.2.0">
+  version="1.3.0">
 
   <name>Speech Recognition</name>
   <description>Cordova Plugin for Speech Recognition</description>
@@ -31,11 +31,15 @@
     <config-file target="AndroidManifest.xml" parent="/*">
       <uses-permission android:name="android.permission.RECORD_AUDIO" />
       <uses-permission android:name="android.permission.INTERNET"/>
+      <!-- Android 11+ package visibility: the recognition service and the popup activity -->
       <queries>
         <intent>
-            <action android:name="android.speech.RecognitionService" />
+          <action android:name="android.speech.RecognitionService" />
         </intent>
-     </queries>
+        <intent>
+          <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+      </queries>
     </config-file>
 
     <source-file src="src/android/com/pbakondy/SpeechRecognition.java" target-dir="src/com/pbakondy" />
@@ -50,12 +54,15 @@
       </feature>
     </config-file>
 
+    <preference name="MICROPHONE_USAGE_DESCRIPTION" default="Request to use Microphone" />
+    <preference name="SPEECH_RECOGNITION_USAGE_DESCRIPTION" default="Request to use Speech Recognition" />
+
     <config-file target="*-Info.plist" parent="NSMicrophoneUsageDescription">
-      <string>Request to use Microphone</string>
+      <string>$MICROPHONE_USAGE_DESCRIPTION</string>
     </config-file>
 
     <config-file target="*-Info.plist" parent="NSSpeechRecognitionUsageDescription">
-      <string>Request to use Speech Recognition</string>
+      <string>$SPEECH_RECOGNITION_USAGE_DESCRIPTION</string>
     </config-file>
 
     <header-file src="src/ios/SpeechRecognition.h"/>
