@@ -9,6 +9,8 @@
 
 #define DEFAULT_LANGUAGE @"en-US"
 #define DEFAULT_MATCHES 5
+// With silenceTimeout set, how long to wait for the speaker to start before giving up (ms)
+#define SPEECH_START_TIMEOUT_MS 5000
 
 #define MESSAGE_MISSING_PERMISSION @"Missing permission"
 #define MESSAGE_ACCESS_DENIED @"User denied access to speech recognition"
@@ -28,6 +30,7 @@
 @property (strong, nonatomic) NSString *previousAudioCategory;
 @property (assign, nonatomic) AVAudioSessionCategoryOptions previousAudioCategoryOptions;
 @property (strong, nonatomic) NSString *previousAudioMode;
+@property (strong, nonatomic) NSTimer *silenceTimer;
 
 @end
 
@@ -90,6 +93,11 @@
         matches = DEFAULT_MATCHES;
     }
     BOOL showPartial = [[command argumentAtIndex:3 withDefault:@(NO)] boolValue];
+    BOOL detailedResults = [[command argumentAtIndex:6 withDefault:@(NO)] boolValue];
+    double silenceTimeout = [[command argumentAtIndex:7 withDefault:@(0)] doubleValue];
+    // iOS never ends the input on its own; a timer re-armed by every new partial
+    // result ends it once the speaker has been silent for silenceTimeout ms.
+    BOOL autoStop = silenceTimeout > 0;
 
     NSLocale *locale = [[NSLocale alloc] initWithLocaleIdentifier:language];
     self.speechRecognizer = [[SFSpeechRecognizer alloc] initWithLocale:locale];
@@ -144,19 +152,23 @@
     }
 
     self.recognitionRequest = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
-    self.recognitionRequest.shouldReportPartialResults = showPartial;
+    // Silence detection needs the partial results even when they are not forwarded.
+    self.recognitionRequest.shouldReportPartialResults = showPartial || autoStop;
 
     SFSpeechAudioBufferRecognitionRequest *request = self.recognitionRequest;
     __block BOOL finished = NO;
+    __block BOOL callbackClosed = NO;
+    __block NSString *lastTranscription = nil;
 
     self.recognitionTask = [self.speechRecognizer recognitionTaskWithRequest:request resultHandler:^(SFSpeechRecognitionResult *result, NSError *error) {
         if (finished) {
             return;
         }
 
-        BOOL isFinal = result.isFinal;
+        BOOL done = result.isFinal || error != nil;
 
-        if ( result ) {
+        // Without showPartial only the last result is sent, which also closes the callback.
+        if ( result && (showPartial || done) ) {
             NSMutableArray *resultArray = [[NSMutableArray alloc] init];
 
             for ( SFTranscription *transcription in result.transcriptions ) {
@@ -170,21 +182,31 @@
 
             NSLog(@"startListening() recognitionTask result array: %@", transcriptions.description);
 
-            CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:transcriptions];
+            CDVPluginResult *pluginResult = [self resultWithMatches:transcriptions isFinal:done detailed:detailedResults];
             // Keep the callback open for partial results until the final one arrives.
-            [pluginResult setKeepCallbackAsBool:(showPartial && !isFinal && !error)];
+            [pluginResult setKeepCallbackAsBool:!done];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            callbackClosed = done;
         }
 
-        if ( error || isFinal ) {
+        // Only new words count as speech; a repeated partial result must not extend the session.
+        NSString *transcription = result.bestTranscription.formattedString;
+        if ( result && !done && autoStop && transcription.length > 0 && ![transcription isEqualToString:lastTranscription] ) {
+            lastTranscription = transcription;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self scheduleSilenceTimer:silenceTimeout forRequest:request];
+            });
+        }
+
+        if ( done ) {
             finished = YES;
 
-            if ( error && !result ) {
+            if ( !callbackClosed ) {
                 NSLog(@"startListening() recognitionTask error: %@", error.description);
                 CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:error.localizedDescription];
                 [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             } else {
-                NSLog(@"startListening() recognitionTask isFinal");
+                NSLog(@"startListening() recognitionTask finished");
             }
 
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -212,6 +234,12 @@
         self.recognitionRequest = nil;
         self.recognitionTask = nil;
         [self sendError:engineError.localizedDescription command:command];
+        return;
+    }
+
+    if (autoStop) {
+        // Until the first words are recognized, give the speaker time to start.
+        [self scheduleSilenceTimer:MAX(silenceTimeout, SPEECH_START_TIMEOUT_MS) forRequest:request];
     }
 }
 
@@ -219,12 +247,7 @@
     dispatch_async(dispatch_get_main_queue(), ^{
         NSLog(@"stopListening()");
 
-        if ( self.audioEngine.isRunning ) {
-            [self.audioEngine stop];
-            [self.audioEngine.inputNode removeTapOnBus:0];
-        }
-        // Lets the recognizer deliver the final result for the audio captured so far.
-        [self.recognitionRequest endAudio];
+        [self endAudioInput];
 
         CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -304,7 +327,53 @@
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
+- (CDVPluginResult *)resultWithMatches:(NSArray *)matches isFinal:(BOOL)isFinal detailed:(BOOL)detailed {
+    if (detailed) {
+        return [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                             messageAsDictionary:@{ @"matches": matches, @"isFinal": @(isFinal) }];
+    }
+    return [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:matches];
+}
+
+// Stops capturing audio; the recognizer then delivers the final result for the audio captured so far.
+// Must run on the main thread.
+- (void)endAudioInput {
+    [self.silenceTimer invalidate];
+    self.silenceTimer = nil;
+
+    if ( self.audioEngine.isRunning ) {
+        [self.audioEngine stop];
+        [self.audioEngine.inputNode removeTapOnBus:0];
+    }
+    [self.recognitionRequest endAudio];
+}
+
+// Must run on the main thread.
+- (void)scheduleSilenceTimer:(double)timeoutMs forRequest:(SFSpeechAudioBufferRecognitionRequest *)request {
+    // A late result of a finished session must not arm a timer for the next one.
+    if (self.recognitionRequest != request) {
+        return;
+    }
+
+    [self.silenceTimer invalidate];
+
+    __weak SpeechRecognition *weakSelf = self;
+    self.silenceTimer = [NSTimer timerWithTimeInterval:(timeoutMs / 1000.0) repeats:NO block:^(NSTimer *timer) {
+        SpeechRecognition *strongSelf = weakSelf;
+        if (strongSelf == nil || strongSelf.recognitionRequest != request) {
+            return;
+        }
+        NSLog(@"startListening() silence timeout, ending audio input");
+        [strongSelf endAudioInput];
+    }];
+    // Common modes: the default mode is paused while the user scrolls the web view.
+    [[NSRunLoop mainRunLoop] addTimer:self.silenceTimer forMode:NSRunLoopCommonModes];
+}
+
 - (void)stopAudio {
+    [self.silenceTimer invalidate];
+    self.silenceTimer = nil;
+
     if (self.audioEngine) {
         if (self.audioEngine.isRunning) {
             [self.audioEngine stop];
