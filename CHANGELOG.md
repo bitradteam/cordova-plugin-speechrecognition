@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.0
+
+- `startListening` option `detailedResults`: results are `{ matches, isFinal }`, so partial and final results can be told apart
+- `startListening` option `silenceTimeout`: stop listening automatically once no new words were recognized for the given milliseconds (iOS and Android without popup)
+- iOS: without `showPartial`, the final result is still delivered when the input is ended by `silenceTimeout`
+
 ## v1.3.0
 
 - Android: results of `startListening` are no longer lost when another method (e.g. `stopListening`) is called while listening

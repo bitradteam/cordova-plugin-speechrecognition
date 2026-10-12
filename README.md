@@ -40,7 +40,9 @@ let options = {
   String prompt,                 // Android only
   Boolean showPopup,             // Android only
   Boolean showPartial,
-  Number completeSilenceLength   // Android only
+  Number completeSilenceLength,  // Android only
+  Boolean detailedResults,
+  Number silenceTimeout
 }
 
 window.plugins.speechRecognition.startListening(
@@ -55,12 +57,43 @@ This method has an options parameter with the following optional values:
 - `showPopup` {Boolean} display listener popup window with prompt (default `true`, Android only)
 - `showPartial` {Boolean} Allow partial results to be returned (default `false`)
 - `completeSilenceLength` {Number} milliseconds of silence after which the input is considered complete (default: system value, Android only, ignored by some recognizers)
+- `detailedResults` {Boolean} return `{ matches, isFinal }` instead of a plain array (default `false`)
+- `silenceTimeout` {Number} stop listening automatically once no new words were recognized for this many milliseconds (default `0` = disabled; works on iOS and Android, not with the Android popup)
 
-Result of success callback is an `Array` of recognized terms.
+Result of success callback is an `Array` of recognized terms, or an `Object` when `detailedResults` is `true`:
 
-There is a difference between Android and iOS platforms. On Android speech recognition stops when the speaker finishes speaking (at end of sentence). On iOS the user has to stop manually the recognition process by calling stopListening() method.
+```js
+{
+  matches: ["first match", "second match"], // Array of recognized terms
+  isFinal: true                              // false for partial results, true for the last callback
+}
+```
 
-If you set `showPartial` to `true` on iOS the success callback will be called multiple times until `stopListening()` called.
+There is a difference between Android and iOS platforms. On Android speech recognition stops when the speaker finishes speaking (at end of sentence). On iOS the user has to stop manually the recognition process by calling stopListening() method, unless `silenceTimeout` is set.
+
+If you set `showPartial` to `true` the success callback will be called multiple times: once per partial result, then once with the final result (Android: only without popup). Use `detailedResults` to tell them apart.
+
+#### Real-time transcription with automatic stop
+
+```js
+window.plugins.speechRecognition.startListening(
+  function (result) {
+    showText(result.matches[0]);
+    if (result.isFinal) {
+      search(result.matches[0]);
+    }
+  },
+  function (error) { console.log(error); },
+  {
+    language: "pt-PT",
+    showPopup: false,
+    showPartial: true,
+    detailedResults: true,
+    silenceTimeout: 1500
+  });
+```
+
+With `silenceTimeout`, recognition waits up to 5 seconds (or `silenceTimeout`, if longer) for the speaker to start. If nothing is said, the error callback is called (iOS: "No speech detected", Android: "No match" or "No speech input"). `stopListening()` can still be called at any time to stop earlier.
 
 ### stopListening()
 

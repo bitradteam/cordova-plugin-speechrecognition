@@ -10,6 +10,7 @@ import org.apache.cordova.PluginResult;
 
 import org.json.JSONArray;
 import org.json.JSONException;
+import org.json.JSONObject;
 
 import android.app.Activity;
 import android.content.Context;
@@ -19,6 +20,8 @@ import android.content.pm.PackageManager;
 import android.Manifest;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -46,7 +49,30 @@ public class SpeechRecognition extends CordovaPlugin {
   private static final String NOT_AVAILABLE = "Speech recognition service is not available on the system.";
   private static final String MISSING_PERMISSION = "Missing permission";
 
+  // With silenceTimeout set, how long to wait for the speaker to start before giving up (ms)
+  private static final int SPEECH_START_TIMEOUT_MS = 5000;
+
   private String mLastPartialResults = "";
+  // Best match of the last partial result; empty until the first words are recognized
+  private String mLastBestMatch = "";
+
+  // Options of the ongoing startListening() session
+  private boolean mShowPartial = false;
+  private boolean mDetailedResults = false;
+  private int mSilenceTimeout = 0;
+
+  // Ends the input once no new words were recognized for mSilenceTimeout ms. The system
+  // end-of-speech detection is not reliable (dictation mode, silence extras ignored).
+  private final Handler mSilenceHandler = new Handler(Looper.getMainLooper());
+  private final Runnable mSilenceRunnable = new Runnable() {
+    @Override
+    public void run() {
+      Log.d(LOG_TAG, "silence timeout, stop listening");
+      if (recognizer != null) {
+        recognizer.stopListening();
+      }
+    }
+  };
 
   private static final String RECORD_AUDIO_PERMISSION = Manifest.permission.RECORD_AUDIO;
 
@@ -83,6 +109,7 @@ public class SpeechRecognition extends CordovaPlugin {
 
   @Override
   public void onDestroy() {
+    cancelSilenceTimer();
     if (view != null) {
       view.post(new Runnable() {
         @Override
@@ -135,9 +162,13 @@ public class SpeechRecognition extends CordovaPlugin {
         }
 
         mLastPartialResults = "";
+        mLastBestMatch = "";
         boolean showPartial = args.optBoolean(3, false);
         boolean showPopup = args.optBoolean(4, true);
         int completeSilenceLength = args.optInt(5, 0);
+        mDetailedResults = args.optBoolean(6, false);
+        mSilenceTimeout = Math.max(args.optInt(7, 0), 0);
+        mShowPartial = showPartial;
 
         speechCallbackContext = callbackContext;
         startListening(lang, matches, prompt, showPartial, showPopup, completeSilenceLength);
@@ -150,6 +181,7 @@ public class SpeechRecognition extends CordovaPlugin {
         view.post(new Runnable() {
           @Override
           public void run() {
+            cancelSilenceTimer();
             if (recognizer != null) {
               recognizer.stopListening();
             }
@@ -207,7 +239,8 @@ public class SpeechRecognition extends CordovaPlugin {
     intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, matches);
     intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE,
             activity.getPackageName());
-    intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, showPartial);
+    // Silence detection needs the partial results even when they are not forwarded.
+    intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, showPartial || mSilenceTimeout > 0);
     intent.putExtra("android.speech.extra.DICTATION_MODE", showPartial);
 
     if (completeSilenceLength > 0) {
@@ -234,6 +267,7 @@ public class SpeechRecognition extends CordovaPlugin {
             recognizer.setRecognitionListener(new SpeechRecognitionListener());
           }
           // Abort any ongoing session, otherwise the service answers with ERROR_RECOGNIZER_BUSY
+          cancelSilenceTimer();
           recognizer.cancel();
           recognizer.startListening(intent);
         }
@@ -305,7 +339,7 @@ public class SpeechRecognition extends CordovaPlugin {
         try {
           ArrayList<String> matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
           JSONArray jsonMatches = matches != null ? new JSONArray(matches) : new JSONArray();
-          speechCallbackContext.success(jsonMatches);
+          speechCallbackContext.sendPluginResult(buildResult(jsonMatches, true));
         } catch (Exception e) {
           e.printStackTrace();
           speechCallbackContext.error(e.getMessage());
@@ -319,11 +353,39 @@ public class SpeechRecognition extends CordovaPlugin {
     super.onActivityResult(requestCode, resultCode, data);
   }
 
+  // A plain array of matches, or { matches, isFinal } when detailedResults is set.
+  private PluginResult buildResult(JSONArray matches, boolean isFinal) throws JSONException {
+    if (!mDetailedResults) {
+      return new PluginResult(PluginResult.Status.OK, matches);
+    }
+    JSONObject result = new JSONObject();
+    result.put("matches", matches);
+    result.put("isFinal", isFinal);
+    return new PluginResult(PluginResult.Status.OK, result);
+  }
+
+  private void scheduleSilenceTimer(int timeoutMs) {
+    if (mSilenceTimeout <= 0) {
+      return;
+    }
+    mSilenceHandler.removeCallbacks(mSilenceRunnable);
+    mSilenceHandler.postDelayed(mSilenceRunnable, timeoutMs);
+  }
+
+  private void cancelSilenceTimer() {
+    mSilenceHandler.removeCallbacks(mSilenceRunnable);
+  }
+
 
   private class SpeechRecognitionListener implements RecognitionListener {
 
     @Override
     public void onBeginningOfSpeech() {
+      // Speech started but no words yet: keep the longer timeout until the first words.
+      // Some recognizers call this again later (dictation mode); then the short timeout stays.
+      if (mLastBestMatch.isEmpty()) {
+        scheduleSilenceTimer(Math.max(mSilenceTimeout, SPEECH_START_TIMEOUT_MS));
+      }
     }
 
     @Override
@@ -336,6 +398,7 @@ public class SpeechRecognition extends CordovaPlugin {
 
     @Override
     public void onError(int errorCode) {
+      cancelSilenceTimer();
       String errorMessage = getErrorText(errorCode);
       Log.d(LOG_TAG, "Error: " + errorMessage);
       if (speechCallbackContext != null) {
@@ -354,15 +417,24 @@ public class SpeechRecognition extends CordovaPlugin {
       if (speechCallbackContext == null || matches == null || matches.isEmpty()) {
         return;
       }
+      // Only new words in the best match count as speech: empty partials (often sent before
+      // any word) and changes in the alternative matches must not re-arm the silence timer.
+      String bestMatch = matches.get(0) == null ? "" : matches.get(0).trim();
+      if (!bestMatch.isEmpty() && !bestMatch.equals(mLastBestMatch)) {
+        mLastBestMatch = bestMatch;
+        scheduleSilenceTimer(mSilenceTimeout);
+      }
       try {
         JSONArray matchesJSON = new JSONArray(matches);
         // JSONArray.equals() compares references, so compare the serialized content
         String serialized = matchesJSON.toString();
         if (!mLastPartialResults.equals(serialized)) {
           mLastPartialResults = serialized;
-          PluginResult pluginResult = new PluginResult(PluginResult.Status.OK, matchesJSON);
-          pluginResult.setKeepCallback(true);
-          speechCallbackContext.sendPluginResult(pluginResult);
+          if (mShowPartial) {
+            PluginResult pluginResult = buildResult(matchesJSON, false);
+            pluginResult.setKeepCallback(true);
+            speechCallbackContext.sendPluginResult(pluginResult);
+          }
         }
       } catch (Exception e) {
         e.printStackTrace();
@@ -373,18 +445,20 @@ public class SpeechRecognition extends CordovaPlugin {
     @Override
     public void onReadyForSpeech(Bundle params) {
       Log.d(LOG_TAG, "onReadyForSpeech");
+      scheduleSilenceTimer(Math.max(mSilenceTimeout, SPEECH_START_TIMEOUT_MS));
     }
 
     @Override
     public void onResults(Bundle results) {
       ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
       Log.d(LOG_TAG, "SpeechRecognitionListener results: " + matches);
+      cancelSilenceTimer();
       if (speechCallbackContext == null) {
         return;
       }
       try {
         JSONArray jsonMatches = matches != null ? new JSONArray(matches) : new JSONArray();
-        speechCallbackContext.success(jsonMatches);
+        speechCallbackContext.sendPluginResult(buildResult(jsonMatches, true));
       } catch (Exception e) {
         e.printStackTrace();
         speechCallbackContext.error(e.getMessage());
